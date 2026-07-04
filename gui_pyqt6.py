@@ -26,9 +26,11 @@ class MainWindow(QMainWindow):
 
         self.freq_edits = []
         self.amp_edits = []
+        self.constvolt_edits = []
 
         self.ref_group = QButtonGroup(self)
         self.tgt_group = QButtonGroup(self)
+        self.mode_group = QButtonGroup(self)
 
         self.setWindowTitle("ART DAQ Sine Wave Controller - PyQt6")
         self.resize(720, 680)
@@ -78,6 +80,27 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(control_layout)
 
         # =========================
+        # 波形模式切换
+        # =========================
+        mode_group = QGroupBox("Waveform Mode")
+        mode_layout = QHBoxLayout(mode_group)
+
+        self.sine_rb = QRadioButton("Sine Wave")
+        self.const_rb = QRadioButton("Constant Voltage")
+        self.mode_group.addButton(self.sine_rb, 0)
+        self.mode_group.addButton(self.const_rb, 1)
+        self.sine_rb.setChecked(True)
+
+        self.mode_group.idClicked.connect(self.switch_mode)
+
+        mode_layout.addStretch()
+        mode_layout.addWidget(self.sine_rb)
+        mode_layout.addWidget(self.const_rb)
+        mode_layout.addStretch()
+
+        main_layout.addWidget(mode_group)
+
+        # =========================
         # 通道参数
         # =========================
         channel_group = QGroupBox("Channel Parameters")
@@ -125,6 +148,42 @@ class MainWindow(QMainWindow):
             channel_layout.addWidget(apply_btn, row, 3)
 
         main_layout.addWidget(channel_group)
+
+        # =========================
+        # 常量电压
+        # =========================
+        const_group = QGroupBox("Constant Voltage (per channel)")
+        const_layout = QGridLayout(const_group)
+
+        const_layout.addWidget(QLabel("Channel"), 0, 0)
+        const_layout.addWidget(QLabel("Voltage (V)"), 0, 1)
+        const_layout.addWidget(QLabel("Action"), 0, 2)
+
+        const_validator = QDoubleValidator(
+            -mp.MAX_AMPLITUDE,
+            mp.MAX_AMPLITUDE,
+            6,
+            self,
+        )
+
+        for ch in range(mp.NUM_CHANNELS):
+            ch_label = QLabel(f"Ch{ch}")
+            ch_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            const_edit = QLineEdit("0.0")
+            const_edit.setValidator(const_validator)
+
+            apply_btn = QPushButton("Apply")
+            apply_btn.clicked.connect(lambda checked=False, c=ch: self.apply_constant(c))
+
+            self.constvolt_edits.append(const_edit)
+
+            row = ch + 1
+            const_layout.addWidget(ch_label, row, 0)
+            const_layout.addWidget(const_edit, row, 1)
+            const_layout.addWidget(apply_btn, row, 2)
+
+        main_layout.addWidget(const_group)
 
         # =========================
         # 相位差设置
@@ -251,6 +310,30 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.show_error("Parameter Error", str(e))
+
+    def apply_constant(self, ch: int):
+        try:
+            volt_text = self.constvolt_edits[ch].text().strip()
+
+            if not volt_text:
+                raise ValueError("Voltage cannot be empty")
+
+            voltage = float(volt_text)
+
+            mp.set_constant(ch, voltage)
+
+            self.log(f"[Ch{ch}] constant voltage = {voltage} V")
+
+        except Exception as e:
+            self.show_error("Parameter Error", str(e))
+
+    def switch_mode(self, mode_id: int):
+        if mode_id == 0:
+            mp.set_mode("sine")
+            self.log(">>> Mode switched to: Sine Wave")
+        else:
+            mp.set_mode("constant")
+            self.log(">>> Mode switched to: Constant Voltage")
 
     def apply_phase(self):
         try:

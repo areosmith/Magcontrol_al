@@ -6,10 +6,10 @@ import numpy as np
 
 
 
-ARTDAQ_LIB_PATH = r"C:\Users\Hsu ichen\PycharmProjects\磁控花剌子模\LIB"
+ARTDAQ_LIB_PATH = Path(__file__).resolve().parent / "LIB"#获取相对路径并转换为绝对路径
 
-if Path(ARTDAQ_LIB_PATH).exists() and ARTDAQ_LIB_PATH not in sys.path:
-    sys.path.append(ARTDAQ_LIB_PATH)
+if ARTDAQ_LIB_PATH.exists() and str(ARTDAQ_LIB_PATH) not in sys.path:
+    sys.path.insert(0, str(ARTDAQ_LIB_PATH))
 
 import artdaq
 from artdaq.constants import AcquisitionType, RegenerationMode
@@ -39,10 +39,11 @@ class SharedParams:
         self.lock = threading.Lock()
 
         self.freq = [1000.0] * NUM_CHANNELS
-        self.amp = [1.0] * NUM_CHANNELS
-
-
+        self.amp = [0.0] * NUM_CHANNELS
         self.phase_rad = [0.0] * NUM_CHANNELS
+        self.constvolt = [0.0] * NUM_CHANNELS
+
+        self.generator = self._generate_waveform
 
     def check_channel(self, ch: int):
         if not isinstance(ch, int):
@@ -51,7 +52,7 @@ class SharedParams:
         if ch < 0 or ch >= NUM_CHANNELS:
             raise ValueError(f"Channel must be between 0 and {NUM_CHANNELS - 1}")
 
-    def set_channel(self, ch: int, freq=None, amp=None):
+    def set_channel(self, ch: int, freq=None, amp=None, constvolt=None):
         self.check_channel(ch)
 
         with self.lock:
@@ -66,8 +67,14 @@ class SharedParams:
             if amp is not None:
                 amp = float(amp)
                 if amp < 0.0 or amp > MAX_AMPLITUDE:
-                    raise ValueError(f"Amplitude must be between 0 and {MAX_AMPLITUDE} V")
+                    raise ValueError(f"MAX_VOLT must be between 0 and {MAX_AMPLITUDE} V")
                 self.amp[ch] = amp
+
+            if constvolt is not None:
+                constvolt = float(constvolt)
+                if constvolt < 0.0 or constvolt > MAX_AMPLITUDE:
+                    raise ValueError(f"MAX_VOLT must be between 0 and {MAX_AMPLITUDE} V")
+                self.constvolt[ch] = constvolt
 
     def set_phase_diff(self, ch_ref: int, ch_target: int, diff_deg: float):
         self.check_channel(ch_ref)
@@ -82,26 +89,27 @@ class SharedParams:
             self.phase_rad[ch_target] = self.phase_rad[ch_ref] + diff_rad
             self.phase_rad[ch_target] = self.phase_rad[ch_target] % (2.0 * np.pi)
 
-    def generate_waveform(self, samples: int = BUFFER_SIZE):
-
-
+    def generate(self, samples: int = BUFFER_SIZE):
         with self.lock:
-            freq = list(self.freq)
-            amp = list(self.amp)
-            phase = list(self.phase_rad)
+            return self.generator(samples)
 
-            n = np.arange(samples, dtype=np.float64)
-            data = np.zeros((NUM_CHANNELS, samples), dtype=np.float64)
+    def _generate_waveform(self, samples: int):
+        freq = np.array(self.freq)
+        amp = np.array(self.amp)
+        phase = np.array(self.phase_rad)
 
-            for ch in range(NUM_CHANNELS):
-                omega = 2.0 * np.pi * freq[ch] / SAMPLE_RATE
-                data[ch, :] = amp[ch] * np.sin(phase[ch] + omega * n)
+        n = np.arange(samples, dtype=np.float64)
+        omega = 2.0 * np.pi * freq / SAMPLE_RATE
 
-                # 更新该通道相位到下一个 buffer 的起点
-                self.phase_rad[ch] = (phase[ch] + omega * samples) % (2.0 * np.pi)
+        data = amp[:, None] * np.sin(phase[:, None] + omega[:, None] * n[None, :])
+
+        self.phase_rad = list((phase + omega * samples) % (2.0 * np.pi))
 
         return data
 
+    def _generate_constantform(self, samples: int):
+        constvolt = np.array(self.constvolt)
+        return np.repeat(constvolt[:, None], samples, axis=1)
 
 _shared = SharedParams()
 _task = None
@@ -111,13 +119,13 @@ _callback_ref = None
 
 
 def _transfer_callback(task_handle, event_type, num_samples, callback_data):
-    """ART DAQ 缓冲区传输回调。"""
+
     global _task, _running, _task_lock
     try:
         if not _running:
             return 0
 
-        data = _shared.generate_waveform(BUFFER_SIZE)
+        data = _shared.generate(BUFFER_SIZE)
 
         with _task_lock:
             if _task is not None and _running:
@@ -153,7 +161,7 @@ def _close_locked():
 
 
 def start():
-    """启动 DAQ 连续输出。"""
+
     global _task, _running, _callback_ref
 
     with _task_lock:
@@ -186,7 +194,7 @@ def start():
             )
 
             prefill_data = np.concatenate(
-                [_shared.generate_waveform(BUFFER_SIZE) for _ in range(PREFILL_BUFFERS)],
+                [_shared.generate(BUFFER_SIZE) for _ in range(PREFILL_BUFFERS)],
                 axis=1,
             )
 
@@ -216,8 +224,8 @@ def start():
             raise
 
 
-def stop():
-    """停止 DAQ 输出（不关闭任务）。"""
+def stop():#停止而不关闭任务，允许重新启动
+
     global _running
 
     with _task_lock:
@@ -241,9 +249,20 @@ def set_sine(channel, amplitude, frequency):
     _shared.set_channel(channel, freq=frequency, amp=amplitude)
 
 
+def set_constant(channel, voltage):
+    _shared.set_channel(channel, constvolt=voltage)
+
+def set_mode(mode: str):
+    if mode == "sine":
+        _shared.generator = _shared._generate_waveform
+    elif mode == "constant":
+        _shared.generator = _shared._generate_constantform
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
 def set_phase_diff(channel_a, channel_b, phase_diff_deg):
     _shared.set_phase_diff(channel_a, channel_b, phase_diff_deg)
 
 
-def generate_waveform(samples: int = BUFFER_SIZE):
-    return _shared.generate_waveform(samples=samples)
+def generate(samples: int = BUFFER_SIZE):
+    return _shared.generate(samples=samples)
