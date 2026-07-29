@@ -1,0 +1,75 @@
+{
+  "config_version": 1,
+  "verified": false,
+  "calibration_date": "",
+  "channel_axes": [
+    "x",
+    "y",
+    "z"
+  ],
+  "channel_signs": [
+    1,
+    1,
+    1
+  ],
+  "field_matrix_t_per_a": [
+    [
+      0.001,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.001,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.001
+    ]
+  ],
+  "ambient_field_t": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "amplifier_gain_v_per_v": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "coil_resistance_ohm": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "coil_inductance_h": [
+    0.01,
+    0.01,
+    0.01
+  ],
+  "daq_voltage_limit_v": [
+    10.0,
+    10.0,
+    10.0
+  ],
+  "peak_current_limit_a": [
+    1.0,
+    1.0,
+    1.0
+  ],
+  "rms_current_limit_a": [
+    0.7,
+    0.7,
+    0.7
+  ],
+  "valid_frequency_hz": [
+    0.0,
+    100.0
+  ],
+  "condition_number_limit": 100.0,
+  "fit_metrics": {
+    "warning": "PLACEHOLDER VALUES ONLY - DO NOT ENABLE verified UNTIL MEASURED"
+  }
+}
