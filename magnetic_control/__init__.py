@@ -1,11 +1,15 @@
-"""Open-loop rotating uniform-field control for a three-axis coil system."""
+"""Calibrated rotating-field and propulsive-force control primitives."""
 
 from .calibration import (
     ActuatorCalibration,
     CalibrationError,
+    CURRENT_DRIVER,
     FieldMatrixFit,
+    GaussmeterDataset,
     RLFit,
+    VOLTAGE_AMPLIFIER,
     fit_field_matrix,
+    fit_gaussmeter_csv,
     fit_rl_channel,
 )
 from .calculator import (
@@ -17,19 +21,78 @@ from .calculator import (
     SafetyLimitError,
     SignalPreview,
 )
+from .force_allocator import AllocationReason, ForceAllocationResult, ForceAllocator
+from .force_command import PropulsionCommand, PropulsionCommandError, PropulsionMode
+from .propulsion_model import (
+    InfeasiblePropulsionTargetError,
+    MonotonicPropulsionLUT,
+    PropulsionInverse,
+    PropulsionModelError,
+    RobotProfile,
+    UnverifiedPropulsionModelError,
+)
+from .spatial_field_map import (
+    CenterFieldMap,
+    FieldMapResult,
+    RegularGridFieldMap,
+    SpatialFieldMap,
+    SpatialFieldMapError,
+)
+from .stage import (
+    DeadbandRecenterController,
+    RecenterAction,
+    RecenterDecision,
+    SimulatedXYStage,
+    StageError,
+    StageLimits,
+    StageState,
+    XYStage,
+)
+from .supervisor import MagneticControlSupervisor, SupervisorResult
 
 __all__ = [
     "ActuatorCalibration",
+    "AllocationReason",
+    "CURRENT_DRIVER",
     "CalibrationError",
     "CalculatorFault",
     "CalculatorStatus",
+    "CenterFieldMap",
     "CommandValidationError",
+    "DeadbandRecenterController",
+    "FieldMapResult",
     "FieldMatrixFit",
+    "ForceAllocationResult",
+    "ForceAllocator",
+    "GaussmeterDataset",
+    "InfeasiblePropulsionTargetError",
+    "MagneticControlSupervisor",
+    "MonotonicPropulsionLUT",
+    "PropulsionCommand",
+    "PropulsionCommandError",
+    "PropulsionInverse",
+    "PropulsionMode",
+    "PropulsionModelError",
     "RLFit",
+    "RecenterAction",
+    "RecenterDecision",
+    "RegularGridFieldMap",
+    "RobotProfile",
     "RotatingFieldCalculator",
     "RotatingFieldCommand",
     "SafetyLimitError",
     "SignalPreview",
+    "SimulatedXYStage",
+    "SpatialFieldMap",
+    "SpatialFieldMapError",
+    "StageError",
+    "StageLimits",
+    "StageState",
+    "SupervisorResult",
+    "UnverifiedPropulsionModelError",
+    "VOLTAGE_AMPLIFIER",
+    "XYStage",
     "fit_field_matrix",
+    "fit_gaussmeter_csv",
     "fit_rl_channel",
 ]

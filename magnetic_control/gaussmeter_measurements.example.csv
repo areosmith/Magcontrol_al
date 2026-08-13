@@ -1,0 +1,8 @@
+current_ch0_a,current_ch1_a,current_ch2_a,field_x_gauss,field_y_gauss,field_z_gauss
+0,0,0,0,0,0
+1,0,0,10,0,0
+-1,0,0,-10,0,0
+0,1,0,0,10,0
+0,-1,0,0,-10,0
+0,0,1,0,0,10
+0,0,-1,0,0,-10

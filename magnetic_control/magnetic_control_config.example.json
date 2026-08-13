@@ -1,5 +1,5 @@
 {
-  "config_version": 1,
+  "config_version": 2,
   "verified": false,
   "calibration_date": "",
   "channel_axes": [
@@ -34,20 +34,35 @@
     0.0,
     0.0
   ],
-  "amplifier_gain_v_per_v": [
+  "channel_drive_modes": [
+    "current_driver",
+    "current_driver",
+    "current_driver"
+  ],
+  "voltage_gain_v_per_v": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "current_gain_a_per_v": [
     1.0,
     1.0,
     1.0
+  ],
+  "current_driver_bandwidth_hz": [
+    100.0,
+    100.0,
+    100.0
   ],
   "coil_resistance_ohm": [
     1.0,
-    1.0,
-    1.0
+    1.2,
+    0.9
   ],
   "coil_inductance_h": [
     0.01,
-    0.01,
-    0.01
+    0.012,
+    0.009
   ],
   "daq_voltage_limit_v": [
     10.0,
@@ -70,6 +85,6 @@
   ],
   "condition_number_limit": 100.0,
   "fit_metrics": {
-    "warning": "PLACEHOLDER VALUES ONLY - DO NOT ENABLE verified UNTIL MEASURED"
+    "warning": "PLACEHOLDER VALUES ONLY. Select each channel drive mode and replace all gains, bandwidths, coil parameters, limits, and field-fit values with measurements before setting verified=true. For voltage_amplifier channels, voltage_gain_v_per_v must be positive. For current_driver channels, current_gain_a_per_v must be positive; zero bandwidth means an ideal driver model."
   }
 }

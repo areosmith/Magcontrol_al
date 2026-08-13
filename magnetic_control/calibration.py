@@ -19,6 +19,7 @@ magnetic model.
 
 from __future__ import annotations
 
+import csv
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,27 @@ import numpy as np
 
 class CalibrationError(ValueError):
     """Raised when calibration data is missing, malformed, or unsafe."""
+
+
+VOLTAGE_AMPLIFIER = "voltage_amplifier"
+CURRENT_DRIVER = "current_driver"
+_SUPPORTED_DRIVE_MODES = frozenset((VOLTAGE_AMPLIFIER, CURRENT_DRIVER))
+
+_GAUSSMETER_CURRENT_COLUMNS = (
+    "current_ch0_a",
+    "current_ch1_a",
+    "current_ch2_a",
+)
+_GAUSSMETER_FIELD_COLUMNS_T = (
+    "field_x_t",
+    "field_y_t",
+    "field_z_t",
+)
+_GAUSSMETER_FIELD_COLUMNS_GAUSS = (
+    "field_x_gauss",
+    "field_y_gauss",
+    "field_z_gauss",
+)
 
 
 def _readonly_array(
@@ -65,6 +87,13 @@ class ActuatorCalibration:
     fit_metrics: Mapping[str, Any] = field(default_factory=dict)
     condition_number_limit: float = 100.0
     config_version: int = 1
+    channel_drive_modes: tuple[str, str, str] = (
+        VOLTAGE_AMPLIFIER,
+        VOLTAGE_AMPLIFIER,
+        VOLTAGE_AMPLIFIER,
+    )
+    current_gain_a_per_v: np.ndarray | None = None
+    current_driver_bandwidth_hz: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -93,6 +122,34 @@ class ActuatorCalibration:
                 self.amplifier_gain_v_per_v,
                 (3,),
                 "amplifier_gain_v_per_v",
+            ),
+        )
+        current_gain = (
+            np.zeros(3, dtype=np.float64)
+            if self.current_gain_a_per_v is None
+            else self.current_gain_a_per_v
+        )
+        object.__setattr__(
+            self,
+            "current_gain_a_per_v",
+            _readonly_array(
+                current_gain,
+                (3,),
+                "current_gain_a_per_v",
+            ),
+        )
+        current_bandwidth = (
+            np.zeros(3, dtype=np.float64)
+            if self.current_driver_bandwidth_hz is None
+            else self.current_driver_bandwidth_hz
+        )
+        object.__setattr__(
+            self,
+            "current_driver_bandwidth_hz",
+            _readonly_array(
+                current_bandwidth,
+                (3,),
+                "current_driver_bandwidth_hz",
             ),
         )
         object.__setattr__(
@@ -140,16 +197,48 @@ class ActuatorCalibration:
             )
         object.__setattr__(self, "channel_axes", axes)
 
+        drive_modes = tuple(str(mode).lower() for mode in self.channel_drive_modes)
+        if len(drive_modes) != 3:
+            raise CalibrationError("channel_drive_modes must contain three entries")
+        unsupported = sorted(set(drive_modes) - _SUPPORTED_DRIVE_MODES)
+        if unsupported:
+            raise CalibrationError(
+                "unsupported channel drive mode(s): " + ", ".join(unsupported)
+            )
+        object.__setattr__(self, "channel_drive_modes", drive_modes)
+
         if not np.all(np.isin(self.channel_signs, (-1.0, 1.0))):
             raise CalibrationError("channel_signs must contain only -1 or +1")
-        if np.any(self.amplifier_gain_v_per_v <= 0):
-            raise CalibrationError("amplifier gains must be positive")
+        voltage_channels = np.array(
+            [mode == VOLTAGE_AMPLIFIER for mode in drive_modes],
+            dtype=bool,
+        )
+        current_channels = ~voltage_channels
+        if np.any(self.amplifier_gain_v_per_v[voltage_channels] <= 0):
+            raise CalibrationError(
+                "voltage-amplifier gains must be positive on voltage-driven channels"
+            )
+        if np.any(self.amplifier_gain_v_per_v[current_channels] < 0):
+            raise CalibrationError("unused voltage-amplifier gains must be non-negative")
+        if np.any(self.current_gain_a_per_v[current_channels] <= 0):
+            raise CalibrationError(
+                "current-driver gains must be positive on current-driven channels"
+            )
+        if np.any(self.current_gain_a_per_v[voltage_channels] < 0):
+            raise CalibrationError("unused current-driver gains must be non-negative")
+        if np.any(self.current_driver_bandwidth_hz < 0):
+            raise CalibrationError("current-driver bandwidths must be non-negative")
         if np.any(self.coil_resistance_ohm <= 0):
             raise CalibrationError("coil resistances must be positive")
         if np.any(self.coil_inductance_h < 0):
             raise CalibrationError("coil inductances must be non-negative")
         if np.any(self.daq_voltage_limit_v <= 0):
             raise CalibrationError("DAQ voltage limits must be positive")
+        if np.any(self.daq_voltage_limit_v > 10.0):
+            raise CalibrationError(
+                "DAQ voltage limits must not exceed the current output-layer "
+                "range of 10 V"
+            )
         if np.any(self.peak_current_limit_a <= 0):
             raise CalibrationError("peak-current limits must be positive")
         if np.any(self.rms_current_limit_a <= 0):
@@ -174,7 +263,7 @@ class ActuatorCalibration:
             raise CalibrationError("condition_number_limit must be finite")
         if self.condition_number_limit <= 1.0:
             raise CalibrationError("condition_number_limit must be greater than 1")
-        if self.config_version != 1:
+        if self.config_version not in (1, 2):
             raise CalibrationError(
                 f"unsupported calibration config version: {self.config_version}"
             )
@@ -259,29 +348,182 @@ class ActuatorCalibration:
         reshape = (3,) + (1,) * (current_array.ndim - 1)
         return self.channel_signs.reshape(reshape) * current_array
 
+    @property
+    def voltage_amplifier_mask(self) -> np.ndarray:
+        """Boolean channel mask; returned arrays are safe for caller mutation."""
+
+        return np.array(
+            [mode == VOLTAGE_AMPLIFIER for mode in self.channel_drive_modes],
+            dtype=bool,
+        )
+
+    @property
+    def current_driver_mask(self) -> np.ndarray:
+        return ~self.voltage_amplifier_mask
+
+    def steady_electrical_current_for_daq_voltage(
+        self,
+        daq_voltage_v: np.ndarray,
+    ) -> np.ndarray:
+        """Convert static DAQ voltage to steady electrical coil current.
+
+        This helper is intended for centre-field calibration runs.  It uses the
+        configured DC voltage gain and coil resistance for voltage amplifiers,
+        or the configured A/V gain for current drivers.  Dynamic waveforms must
+        still use :meth:`electrical_current_step`.
+        """
+
+        voltage = np.asarray(daq_voltage_v, dtype=np.float64)
+        if voltage.ndim == 0 or voltage.shape[0] != 3:
+            raise CalibrationError(
+                "daq_voltage_v must have first dimension 3 (channel order)"
+            )
+        if not np.all(np.isfinite(voltage)):
+            raise CalibrationError("daq_voltage_v must contain only finite values")
+        reshape = (3,) + (1,) * (voltage.ndim - 1)
+        current_per_volt = np.empty(3, dtype=np.float64)
+        voltage_mask = self.voltage_amplifier_mask
+        current_mask = self.current_driver_mask
+        current_per_volt[voltage_mask] = (
+            self.amplifier_gain_v_per_v[voltage_mask]
+            / self.coil_resistance_ohm[voltage_mask]
+        )
+        current_per_volt[current_mask] = self.current_gain_a_per_v[current_mask]
+        return current_per_volt.reshape(reshape) * voltage
+
+    def steady_model_current_for_daq_voltage(
+        self,
+        daq_voltage_v: np.ndarray,
+    ) -> np.ndarray:
+        """Convert static DAQ voltage directly to signed field-model current."""
+
+        return self.electrical_to_model_current(
+            self.steady_electrical_current_for_daq_voltage(daq_voltage_v)
+        )
+
+    @property
+    def voltage_gain_v_per_v(self) -> np.ndarray:
+        """Unambiguous alias for the legacy ``amplifier_gain_v_per_v`` field."""
+
+        return self.amplifier_gain_v_per_v
+
+    def daq_voltage_components_for_current(
+        self,
+        dc_current_a: np.ndarray,
+        cosine_current_a: np.ndarray,
+        sine_current_a: np.ndarray,
+        signed_frequency_hz: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Convert sinusoidal current components to DAQ-voltage components.
+
+        Currents follow ``dc + cosine*cos(theta) + sine*sin(theta)``.  A
+        voltage-amplifier channel uses the measured amplifier voltage gain and
+        the channel's series R/L model.  A current-driver channel uses A/V gain;
+        a positive bandwidth applies a first-order closed-loop model, while a
+        zero bandwidth selects an ideal memoryless driver.
+        """
+
+        components = []
+        for name, value in (
+            ("dc_current_a", dc_current_a),
+            ("cosine_current_a", cosine_current_a),
+            ("sine_current_a", sine_current_a),
+        ):
+            component = np.asarray(value, dtype=np.float64)
+            if component.shape != (3,) or not np.all(np.isfinite(component)):
+                raise CalibrationError(f"{name} must be a finite three-vector")
+            components.append(component)
+        dc_current, cosine_current, sine_current = components
+        frequency = float(signed_frequency_hz)
+        if not np.isfinite(frequency):
+            raise CalibrationError("signed_frequency_hz must be finite")
+        omega = 2.0 * np.pi * frequency
+
+        dc_voltage = np.empty(3, dtype=np.float64)
+        cosine_voltage = np.empty(3, dtype=np.float64)
+        sine_voltage = np.empty(3, dtype=np.float64)
+
+        voltage_mask = self.voltage_amplifier_mask
+        voltage_gain = self.amplifier_gain_v_per_v[voltage_mask]
+        resistance = self.coil_resistance_ohm[voltage_mask]
+        inductance = self.coil_inductance_h[voltage_mask]
+        dc_voltage[voltage_mask] = (
+            resistance * dc_current[voltage_mask] / voltage_gain
+        )
+        cosine_voltage[voltage_mask] = (
+            resistance * cosine_current[voltage_mask]
+            + inductance * omega * sine_current[voltage_mask]
+        ) / voltage_gain
+        sine_voltage[voltage_mask] = (
+            resistance * sine_current[voltage_mask]
+            - inductance * omega * cosine_current[voltage_mask]
+        ) / voltage_gain
+
+        current_mask = self.current_driver_mask
+        current_gain = self.current_gain_a_per_v[current_mask]
+        bandwidth = self.current_driver_bandwidth_hz[current_mask]
+        inverse_corner = np.zeros_like(bandwidth)
+        finite_bandwidth = bandwidth > 0.0
+        inverse_corner[finite_bandwidth] = (
+            1.0 / (2.0 * np.pi * bandwidth[finite_bandwidth])
+        )
+        dc_voltage[current_mask] = dc_current[current_mask] / current_gain
+        cosine_voltage[current_mask] = (
+            cosine_current[current_mask]
+            + omega * inverse_corner * sine_current[current_mask]
+        ) / current_gain
+        sine_voltage[current_mask] = (
+            sine_current[current_mask]
+            - omega * inverse_corner * cosine_current[current_mask]
+        ) / current_gain
+        return dc_voltage, cosine_voltage, sine_voltage
+
     def rl_discrete_coefficients(self, dt_s: float) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``a, b`` for ``i[k+1] = a*i[k] + b*v_daq[k]``."""
+        """Return ``a, b`` for ``i[k+1] = a*i[k] + b*v_daq[k]``.
+
+        The historical method name is retained for compatibility.  Returned
+        coefficients also cover current-driver channels.
+        """
 
         dt_s = float(dt_s)
         if not np.isfinite(dt_s) or dt_s <= 0:
             raise CalibrationError("dt_s must be a positive finite value")
 
-        resistance = self.coil_resistance_ohm
-        inductance = self.coil_inductance_h
-        gain = self.amplifier_gain_v_per_v
-
-        dynamic = inductance > 1e-15
         a = np.zeros(3, dtype=np.float64)
-        a[dynamic] = np.exp(
-            -resistance[dynamic] * dt_s / inductance[dynamic]
-        )
         b = np.empty(3, dtype=np.float64)
-        b[dynamic] = (
-            gain[dynamic]
-            / resistance[dynamic]
-            * (1.0 - a[dynamic])
+
+        voltage_mask = self.voltage_amplifier_mask
+        inductance = self.coil_inductance_h
+        resistance = self.coil_resistance_ohm
+        voltage_dynamic = voltage_mask & (inductance > 1e-15)
+        voltage_static = voltage_mask & ~voltage_dynamic
+        a[voltage_dynamic] = np.exp(
+            -resistance[voltage_dynamic]
+            * dt_s
+            / inductance[voltage_dynamic]
         )
-        b[~dynamic] = gain[~dynamic] / resistance[~dynamic]
+        b[voltage_dynamic] = (
+            self.amplifier_gain_v_per_v[voltage_dynamic]
+            / resistance[voltage_dynamic]
+            * (1.0 - a[voltage_dynamic])
+        )
+        b[voltage_static] = (
+            self.amplifier_gain_v_per_v[voltage_static]
+            / resistance[voltage_static]
+        )
+
+        current_mask = self.current_driver_mask
+        bandwidth = self.current_driver_bandwidth_hz
+        current_dynamic = current_mask & (bandwidth > 0.0)
+        current_static = current_mask & ~current_dynamic
+        a[current_dynamic] = np.exp(
+            -2.0 * np.pi * bandwidth[current_dynamic] * dt_s
+        )
+        b[current_dynamic] = (
+            self.current_gain_a_per_v[current_dynamic]
+            * (1.0 - a[current_dynamic])
+        )
+        b[current_static] = self.current_gain_a_per_v[current_static]
         return a, b
 
     def daq_voltage_for_current_step(
@@ -326,7 +568,7 @@ class ActuatorCalibration:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "config_version": self.config_version,
             "verified": self.verified,
             "calibration_date": self.calibration_date,
@@ -334,7 +576,11 @@ class ActuatorCalibration:
             "channel_signs": self.channel_signs.tolist(),
             "field_matrix_t_per_a": self.field_matrix_t_per_a.tolist(),
             "ambient_field_t": self.ambient_field_t.tolist(),
-            "amplifier_gain_v_per_v": self.amplifier_gain_v_per_v.tolist(),
+            "channel_drive_modes": list(self.channel_drive_modes),
+            "current_gain_a_per_v": self.current_gain_a_per_v.tolist(),
+            "current_driver_bandwidth_hz": (
+                self.current_driver_bandwidth_hz.tolist()
+            ),
             "coil_resistance_ohm": self.coil_resistance_ohm.tolist(),
             "coil_inductance_h": self.coil_inductance_h.tolist(),
             "daq_voltage_limit_v": self.daq_voltage_limit_v.tolist(),
@@ -344,16 +590,40 @@ class ActuatorCalibration:
             "condition_number_limit": self.condition_number_limit,
             "fit_metrics": dict(self.fit_metrics),
         }
+        gain_key = (
+            "amplifier_gain_v_per_v"
+            if self.config_version == 1
+            else "voltage_gain_v_per_v"
+        )
+        data[gain_key] = self.amplifier_gain_v_per_v.tolist()
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ActuatorCalibration":
         try:
+            drive_modes = tuple(
+                data.get(
+                    "channel_drive_modes",
+                    (VOLTAGE_AMPLIFIER,) * 3,
+                )
+            )
+            amplifier_gain = data.get(
+                "voltage_gain_v_per_v",
+                data.get("amplifier_gain_v_per_v"),
+            )
+            if amplifier_gain is None:
+                if any(
+                    str(mode).lower() == VOLTAGE_AMPLIFIER
+                    for mode in drive_modes
+                ):
+                    raise KeyError("amplifier_gain_v_per_v")
+                amplifier_gain = [0.0, 0.0, 0.0]
             return cls(
                 field_matrix_t_per_a=data["field_matrix_t_per_a"],
                 ambient_field_t=data["ambient_field_t"],
                 channel_axes=tuple(data["channel_axes"]),
                 channel_signs=data["channel_signs"],
-                amplifier_gain_v_per_v=data["amplifier_gain_v_per_v"],
+                amplifier_gain_v_per_v=amplifier_gain,
                 coil_resistance_ohm=data["coil_resistance_ohm"],
                 coil_inductance_h=data["coil_inductance_h"],
                 daq_voltage_limit_v=data["daq_voltage_limit_v"],
@@ -367,6 +637,11 @@ class ActuatorCalibration:
                     data.get("condition_number_limit", 100.0)
                 ),
                 config_version=int(data.get("config_version", 1)),
+                channel_drive_modes=drive_modes,
+                current_gain_a_per_v=data.get("current_gain_a_per_v"),
+                current_driver_bandwidth_hz=data.get(
+                    "current_driver_bandwidth_hz"
+                ),
             )
         except KeyError as exc:
             raise CalibrationError(
@@ -396,6 +671,153 @@ class FieldMatrixFit:
     rms_error_t: np.ndarray
     max_vector_error_t: float
     condition_number: float
+
+
+@dataclass(frozen=True)
+class GaussmeterDataset:
+    """Offline three-axis gaussmeter samples in SI units.
+
+    ``model_currents_a`` uses the same signed channel order as the columns of
+    ``field_matrix_t_per_a``.  If a logger records electrical current instead,
+    convert it with ``ActuatorCalibration.electrical_to_model_current`` before
+    constructing or exporting this dataset.
+    """
+
+    model_currents_a: np.ndarray
+    measured_fields_t: np.ndarray
+    source: str = ""
+
+    def __post_init__(self) -> None:
+        currents = np.array(self.model_currents_a, dtype=np.float64, copy=True)
+        fields = np.array(self.measured_fields_t, dtype=np.float64, copy=True)
+        if currents.ndim != 2 or currents.shape[1] != 3:
+            raise CalibrationError("model_currents_a must have shape (N, 3)")
+        if fields.shape != currents.shape:
+            raise CalibrationError(
+                "measured_fields_t must have the same (N, 3) shape as currents"
+            )
+        if currents.shape[0] == 0:
+            raise CalibrationError("gaussmeter dataset must contain at least one row")
+        if not np.all(np.isfinite(currents)) or not np.all(np.isfinite(fields)):
+            raise CalibrationError("gaussmeter samples must be finite")
+        currents.setflags(write=False)
+        fields.setflags(write=False)
+        object.__setattr__(self, "model_currents_a", currents)
+        object.__setattr__(self, "measured_fields_t", fields)
+        object.__setattr__(self, "source", str(self.source))
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "GaussmeterDataset":
+        """Load the stable offline CSV format (field columns in T or gauss)."""
+
+        csv_path = Path(path)
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
+                reader = csv.DictReader(file)
+                fieldnames = tuple(reader.fieldnames or ())
+                missing_current = [
+                    name for name in _GAUSSMETER_CURRENT_COLUMNS
+                    if name not in fieldnames
+                ]
+                if missing_current:
+                    raise CalibrationError(
+                        "gaussmeter CSV is missing column(s): "
+                        + ", ".join(missing_current)
+                    )
+                has_tesla = all(
+                    name in fieldnames for name in _GAUSSMETER_FIELD_COLUMNS_T
+                )
+                has_gauss = all(
+                    name in fieldnames for name in _GAUSSMETER_FIELD_COLUMNS_GAUSS
+                )
+                if has_tesla == has_gauss:
+                    raise CalibrationError(
+                        "gaussmeter CSV must contain exactly one complete field "
+                        "column set: field_[xyz]_t or field_[xyz]_gauss"
+                    )
+                field_columns = (
+                    _GAUSSMETER_FIELD_COLUMNS_T
+                    if has_tesla
+                    else _GAUSSMETER_FIELD_COLUMNS_GAUSS
+                )
+                field_scale = 1.0 if has_tesla else 1e-4
+                current_rows: list[list[float]] = []
+                field_rows: list[list[float]] = []
+                for row_number, row in enumerate(reader, start=2):
+                    try:
+                        current_rows.append(
+                            [float(row[name]) for name in _GAUSSMETER_CURRENT_COLUMNS]
+                        )
+                        field_rows.append(
+                            [float(row[name]) * field_scale for name in field_columns]
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise CalibrationError(
+                            f"gaussmeter CSV row {row_number} contains a non-number"
+                        ) from exc
+        except OSError as exc:
+            raise CalibrationError(
+                f"cannot read gaussmeter CSV {csv_path}: {exc}"
+            ) from exc
+        return cls(current_rows, field_rows, source=str(csv_path))
+
+    def to_csv(self, path: str | Path, field_unit: str = "tesla") -> None:
+        """Write samples using explicit SI or gauss field column names."""
+
+        normalized_unit = str(field_unit).strip().lower()
+        if normalized_unit in ("tesla", "t"):
+            field_columns = _GAUSSMETER_FIELD_COLUMNS_T
+            field_scale = 1.0
+        elif normalized_unit in ("gauss", "g"):
+            field_columns = _GAUSSMETER_FIELD_COLUMNS_GAUSS
+            field_scale = 1e4
+        else:
+            raise CalibrationError("field_unit must be 'tesla' or 'gauss'")
+        csv_path = Path(path)
+        try:
+            with csv_path.open("w", encoding="utf-8", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow((*_GAUSSMETER_CURRENT_COLUMNS, *field_columns))
+                for currents, fields in zip(
+                    self.model_currents_a,
+                    self.measured_fields_t,
+                    strict=True,
+                ):
+                    writer.writerow((*currents.tolist(), *(fields * field_scale).tolist()))
+        except OSError as exc:
+            raise CalibrationError(
+                f"cannot write gaussmeter CSV {csv_path}: {exc}"
+            ) from exc
+
+    def fit_field_matrix(self) -> FieldMatrixFit:
+        """Fit the affine center-field model from these samples."""
+
+        return fit_field_matrix(self.model_currents_a, self.measured_fields_t)
+
+    @classmethod
+    def from_static_daq_voltages(
+        cls,
+        calibration: ActuatorCalibration,
+        daq_voltages_v: np.ndarray,
+        measured_fields_t: np.ndarray,
+        *,
+        source: str = "",
+    ) -> "GaussmeterDataset":
+        """Build samples when a calibration run logged static DAQ voltages.
+
+        The configured amplifier/driver DC gains must already be measured.
+        This method does not replace direct current measurement when driver
+        gain, saturation, or load regulation is uncertain.
+        """
+
+        voltages = np.asarray(daq_voltages_v, dtype=np.float64)
+        fields = np.asarray(measured_fields_t, dtype=np.float64)
+        if voltages.ndim != 2 or voltages.shape[1] != 3:
+            raise CalibrationError("daq_voltages_v must have shape (N, 3)")
+        model_currents = calibration.steady_model_current_for_daq_voltage(
+            voltages.T
+        ).T
+        return cls(model_currents, fields, source=source)
 
 
 def fit_field_matrix(
@@ -442,6 +864,12 @@ def fit_field_matrix(
         max_vector_error_t=max_vector,
         condition_number=condition,
     )
+
+
+def fit_gaussmeter_csv(path: str | Path) -> FieldMatrixFit:
+    """Load an offline gaussmeter CSV and fit its affine field matrix."""
+
+    return GaussmeterDataset.from_csv(path).fit_field_matrix()
 
 
 @dataclass(frozen=True)

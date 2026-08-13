@@ -452,18 +452,14 @@ class RotatingFieldCalculator:
         cosine_current = signs * cosine_model
         sine_current = signs * sine_model
 
-        resistance = self.calibration.coil_resistance_ohm
-        inductance = self.calibration.coil_inductance_h
-        gain = self.calibration.amplifier_gain_v_per_v
-        dc_voltage = resistance * dc_current / gain
-        cosine_voltage = (
-            resistance * cosine_current
-            + inductance * signed_omega * sine_current
-        ) / gain
-        sine_voltage = (
-            resistance * sine_current
-            - inductance * signed_omega * cosine_current
-        ) / gain
+        dc_voltage, cosine_voltage, sine_voltage = (
+            self.calibration.daq_voltage_components_for_current(
+                dc_current,
+                cosine_current,
+                sine_current,
+                signed_frequency_hz=(signed_omega / (2.0 * np.pi)),
+            )
+        )
 
         current_ac_amplitude = np.hypot(cosine_current, sine_current)
         voltage_ac_amplitude = np.hypot(cosine_voltage, sine_voltage)
